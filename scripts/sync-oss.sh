@@ -27,6 +27,9 @@ rsync -av --delete \
   --exclude='SPEC.md' \
   --exclude='.env.example' \
   --exclude='tsconfig.base.json' \
+  --exclude='CLAUDE.md' \
+  --exclude='.mcp.json' \
+  --exclude='*.toml.bak' \
   "$PRIVATE_DIR/" "$OSS_DIR/"
 
 # Clean secrets
