@@ -51,6 +51,8 @@ export type Env = {
     LINE_LOGIN_CHANNEL_SECRET: string;
     WORKER_URL: string;
     X_HARNESS_URL?: string;  // Optional: X Harness API URL for account linking
+    GOOGLE_SERVICE_ACCOUNT_KEY?: string;
+    GOOGLE_CALENDAR_ID?: string;
   };
   Variables: {
     staff: { id: string; name: string; role: 'owner' | 'admin' | 'staff' };

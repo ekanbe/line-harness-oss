@@ -224,6 +224,79 @@ forms.post('/api/forms/:id/submit', async (c) => {
       data: JSON.stringify(submissionData),
     });
 
+    // Google Calendar event creation (best-effort, runs regardless of friend resolution)
+    if (c.env.GOOGLE_SERVICE_ACCOUNT_KEY && c.env.GOOGLE_CALENDAR_ID) {
+      const dateField = fields.find((f) => f.type === 'date');
+      const timeField = fields.find(
+        (f) =>
+          (f.type as string) === 'select' &&
+          (f.name.toLowerCase().includes('time') || (f.label || '').includes('時間')),
+      );
+      const dateValue = dateField ? submissionData[dateField.name] : undefined;
+      const timeValue = timeField ? submissionData[timeField.name] : undefined;
+
+      if (
+        typeof dateValue === 'string' &&
+        typeof timeValue === 'string' &&
+        /^\d{4}-\d{2}-\d{2}$/.test(dateValue) &&
+        /^\d{2}:\d{2}-\d{2}:\d{2}$/.test(timeValue)
+      ) {
+        const [startTime, endTime] = timeValue.split('-');
+        const startIso = `${dateValue}T${startTime}:00+09:00`;
+        const endIso = `${dateValue}T${endTime}:00+09:00`;
+
+        const companyField = fields.find(
+          (f) =>
+            f.name.toLowerCase().includes('company') ||
+            (f.label || '').includes('会社') ||
+            (f.label || '').includes('店舗'),
+        );
+        const contactField = fields.find(
+          (f) =>
+            f.name.toLowerCase().includes('contact') || (f.label || '').includes('担当'),
+        );
+        const companyVal = companyField
+          ? String(submissionData[companyField.name] ?? '')
+          : '';
+        const contactVal = contactField
+          ? String(submissionData[contactField.name] ?? '')
+          : '';
+        const summary = `[予約] ${companyVal || '会社名未記入'}${contactVal ? ' - ' + contactVal : ''}`;
+
+        const descLines = fields.map((f) => {
+          const v = submissionData[f.name];
+          const valStr = Array.isArray(v)
+            ? v.join(', ')
+            : v === null || v === undefined || v === ''
+              ? '-'
+              : String(v);
+          return `${f.label}: ${valStr}`;
+        });
+
+        const serviceAccountKey = c.env.GOOGLE_SERVICE_ACCOUNT_KEY;
+        const calendarId = c.env.GOOGLE_CALENDAR_ID;
+        (async () => {
+          try {
+            const { getGoogleAccessToken } = await import('../services/google-auth.js');
+            const { GoogleCalendarClient } = await import(
+              '../services/google-calendar.js'
+            );
+            const accessToken = await getGoogleAccessToken(serviceAccountKey);
+            const calClient = new GoogleCalendarClient({ calendarId, accessToken });
+            await calClient.createEvent({
+              summary,
+              description: descLines.join('\n'),
+              start: startIso,
+              end: endIso,
+            });
+            console.log('Google Calendar event created for submission', submission.id);
+          } catch (err) {
+            console.error('Google Calendar event creation failed:', err);
+          }
+        })();
+      }
+    }
+
     // Side effects (best-effort, don't fail the request)
     if (friendId) {
       const db = c.env.DB;
