@@ -23,11 +23,12 @@ function base64urlEncode(input: ArrayBuffer | string): string {
 }
 
 function pemToArrayBuffer(pem: string): ArrayBuffer {
-  const cleaned = pem
-    .replace(/-----BEGIN PRIVATE KEY-----/g, '')
-    .replace(/-----END PRIVATE KEY-----/g, '')
-    .replace(/\\n/g, '\n')
-    .replace(/\s+/g, '');
+  // Extract content between BEGIN/END markers if present
+  const match = pem.match(/-----BEGIN [^-]+-----([\s\S]*?)-----END [^-]+-----/);
+  const body = match ? match[1] : pem;
+  // Keep only valid base64 characters (handles \n, \r, literal \\n, spaces, etc.)
+  const cleaned = body.replace(/[^A-Za-z0-9+/=]/g, '');
+  if (!cleaned) throw new Error('Invalid PEM: no base64 content found');
   const binary = atob(cleaned);
   const buf = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) buf[i] = binary.charCodeAt(i);
