@@ -275,7 +275,7 @@ forms.post('/api/forms/:id/submit', async (c) => {
 
         const serviceAccountKey = c.env.GOOGLE_SERVICE_ACCOUNT_KEY;
         const calendarId = c.env.GOOGLE_CALENDAR_ID;
-        (async () => {
+        const calendarPromise = (async () => {
           try {
             const { getGoogleAccessToken } = await import('../services/google-auth.js');
             const { GoogleCalendarClient } = await import(
@@ -294,6 +294,7 @@ forms.post('/api/forms/:id/submit', async (c) => {
             console.error('Google Calendar event creation failed:', err);
           }
         })();
+        c.executionCtx.waitUntil(calendarPromise);
       }
     }
 
