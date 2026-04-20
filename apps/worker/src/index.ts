@@ -107,6 +107,9 @@ app.get('/api/test/diag', async (c) => {
   try {
     const parsed = JSON.parse(c.env.GOOGLE_SERVICE_ACCOUNT_KEY) as { private_key?: string; client_email?: string };
     const pk = parsed.private_key || '';
+    const match = pk.match(/-----BEGIN [^-]+-----([\s\S]*?)-----END [^-]+-----/);
+    const body = match ? match[1] : pk;
+    const cleaned = body.replace(/[^A-Za-z0-9+/=]/g, '');
     return c.json({
       rawLength: c.env.GOOGLE_SERVICE_ACCOUNT_KEY.length,
       keyLength: pk.length,
@@ -114,6 +117,11 @@ app.get('/api/test/diag', async (c) => {
       keyEnd: pk.slice(-80),
       hasLiteralBackslashN: pk.includes('\\n'),
       hasRealNewline: pk.includes('\n'),
+      regexMatched: match !== null,
+      cleanedLength: cleaned.length,
+      cleanedDivisibleBy4: cleaned.length % 4 === 0,
+      cleanedStart: cleaned.slice(0, 40),
+      cleanedEnd: cleaned.slice(-40),
       clientEmail: parsed.client_email,
       calendarId: c.env.GOOGLE_CALENDAR_ID,
     });
