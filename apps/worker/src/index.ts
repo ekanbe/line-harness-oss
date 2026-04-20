@@ -101,31 +101,34 @@ app.route('/', adPlatforms);
 app.route('/', staff);
 app.route('/', images);
 
-// TEMP: Calendar integration diagnostic endpoint
+// TEMP: Calendar diagnostic endpoint
+app.get('/api/test/diag', async (c) => {
+  if (!c.env.GOOGLE_SERVICE_ACCOUNT_KEY) return c.json({ error: 'no key' }, 500);
+  try {
+    const parsed = JSON.parse(c.env.GOOGLE_SERVICE_ACCOUNT_KEY) as { private_key?: string; client_email?: string };
+    const pk = parsed.private_key || '';
+    return c.json({
+      rawLength: c.env.GOOGLE_SERVICE_ACCOUNT_KEY.length,
+      keyLength: pk.length,
+      keyStart: pk.slice(0, 80),
+      keyEnd: pk.slice(-80),
+      hasLiteralBackslashN: pk.includes('\\n'),
+      hasRealNewline: pk.includes('\n'),
+      clientEmail: parsed.client_email,
+      calendarId: c.env.GOOGLE_CALENDAR_ID,
+    });
+  } catch (err) {
+    return c.json({ parseError: err instanceof Error ? err.message : String(err), rawStart: c.env.GOOGLE_SERVICE_ACCOUNT_KEY.slice(0, 200) }, 500);
+  }
+});
+
+// TEMP: Calendar integration test endpoint
 app.get('/api/test/calendar', async (c) => {
   if (!c.env.GOOGLE_SERVICE_ACCOUNT_KEY) {
     return c.json({ success: false, error: 'GOOGLE_SERVICE_ACCOUNT_KEY not set' }, 500);
   }
   if (!c.env.GOOGLE_CALENDAR_ID) {
     return c.json({ success: false, error: 'GOOGLE_CALENDAR_ID not set' }, 500);
-  }
-  // Diagnostic: inspect private key shape
-  try {
-    const parsed = JSON.parse(c.env.GOOGLE_SERVICE_ACCOUNT_KEY) as { private_key?: string; client_email?: string };
-    const pk = parsed.private_key || '';
-    const diag = {
-      keyLength: pk.length,
-      keyStart: pk.slice(0, 60),
-      keyEnd: pk.slice(-60),
-      hasLiteralBackslashN: pk.includes('\\n'),
-      hasRealNewline: pk.includes('\n'),
-      clientEmail: parsed.client_email,
-    };
-    if (c.req.query('diag') === '1') {
-      return c.json({ success: true, diag });
-    }
-  } catch (err) {
-    return c.json({ success: false, error: `JSON.parse failed: ${err instanceof Error ? err.message : String(err)}` }, 500);
   }
   try {
     const { getGoogleAccessToken } = await import('./services/google-auth.js');
