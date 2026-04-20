@@ -101,64 +101,6 @@ app.route('/', adPlatforms);
 app.route('/', staff);
 app.route('/', images);
 
-// TEMP: Calendar diagnostic endpoint
-app.get('/api/test/diag', async (c) => {
-  if (!c.env.GOOGLE_SERVICE_ACCOUNT_KEY) return c.json({ error: 'no key' }, 500);
-  try {
-    const parsed = JSON.parse(c.env.GOOGLE_SERVICE_ACCOUNT_KEY) as { private_key?: string; client_email?: string };
-    const pk = parsed.private_key || '';
-    const match = pk.match(/-----BEGIN [^-]+-----([\s\S]*?)-----END [^-]+-----/);
-    const body = match ? match[1] : pk;
-    const cleaned = body.replace(/[^A-Za-z0-9+/=]/g, '');
-    return c.json({
-      rawLength: c.env.GOOGLE_SERVICE_ACCOUNT_KEY.length,
-      keyLength: pk.length,
-      keyStart: pk.slice(0, 80),
-      keyEnd: pk.slice(-80),
-      hasLiteralBackslashN: pk.includes('\\n'),
-      hasRealNewline: pk.includes('\n'),
-      regexMatched: match !== null,
-      cleanedLength: cleaned.length,
-      cleanedDivisibleBy4: cleaned.length % 4 === 0,
-      cleanedStart: cleaned.slice(0, 40),
-      cleanedEnd: cleaned.slice(-40),
-      clientEmail: parsed.client_email,
-      calendarId: c.env.GOOGLE_CALENDAR_ID,
-    });
-  } catch (err) {
-    return c.json({ parseError: err instanceof Error ? err.message : String(err), rawStart: c.env.GOOGLE_SERVICE_ACCOUNT_KEY.slice(0, 200) }, 500);
-  }
-});
-
-// TEMP: Calendar integration test endpoint
-app.get('/api/test/calendar', async (c) => {
-  if (!c.env.GOOGLE_SERVICE_ACCOUNT_KEY) {
-    return c.json({ success: false, error: 'GOOGLE_SERVICE_ACCOUNT_KEY not set' }, 500);
-  }
-  if (!c.env.GOOGLE_CALENDAR_ID) {
-    return c.json({ success: false, error: 'GOOGLE_CALENDAR_ID not set' }, 500);
-  }
-  try {
-    const { getGoogleAccessToken } = await import('./services/google-auth.js');
-    const { GoogleCalendarClient } = await import('./services/google-calendar.js');
-    const accessToken = await getGoogleAccessToken(c.env.GOOGLE_SERVICE_ACCOUNT_KEY);
-    const calClient = new GoogleCalendarClient({
-      calendarId: c.env.GOOGLE_CALENDAR_ID,
-      accessToken,
-    });
-    const result = await calClient.createEvent({
-      summary: '[テスト] カレンダー連携動作確認',
-      description: 'テストエンドポイントからの動作確認イベント',
-      start: '2026-04-22T14:00:00+09:00',
-      end: '2026-04-22T15:00:00+09:00',
-    });
-    return c.json({ success: true, eventId: result.eventId, tokenPrefix: accessToken.slice(0, 12) });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return c.json({ success: false, error: message }, 500);
-  }
-});
-
 // Short link: /r/:ref → landing page with LINE open button
 app.get('/r/:ref', (c) => {
   const ref = c.req.param('ref');
