@@ -124,13 +124,14 @@ function renderField(field: FormField): string {
       const boxes = (field.options ?? [])
         .map(
           (o) =>
-            `<label class="checkbox-label">
+            `<label class="checkbox-label" data-option="${escapeHtml(o)}">
               <input type="checkbox" name="${escapeHtml(field.name)}" value="${escapeHtml(o)}" />
-              ${escapeHtml(o)}
+              <span class="option-label">${escapeHtml(o)}</span>
+              <span class="option-status"></span>
             </label>`,
         )
         .join('');
-      inputHtml = `<div class="checkbox-group">${boxes}</div>`;
+      inputHtml = `<div class="checkbox-group" data-field-name="${escapeHtml(field.name)}">${boxes}</div>`;
       break;
     }
 
@@ -202,6 +203,25 @@ function injectStyles(): void {
     }
     .submit-btn:active { opacity: 0.85; }
     .submit-btn:disabled { background: #bbb; cursor: not-allowed; }
+    .checkbox-label.unavailable {
+      opacity: 0.45;
+      cursor: not-allowed;
+      background: #f3f4f6;
+      border-color: #e5e7eb;
+    }
+    .checkbox-label.unavailable input { cursor: not-allowed; pointer-events: none; }
+    .checkbox-label.unavailable .option-status::before {
+      content: '予約済';
+      display: inline-block;
+      font-size: 11px;
+      color: #9ca3af;
+      background: #e5e7eb;
+      padding: 2px 6px;
+      border-radius: 4px;
+      margin-left: auto;
+    }
+    .checkbox-label { justify-content: space-between; }
+    .slot-loading { font-size: 12px; color: #94a3b8; margin: 4px 0 8px; }
     .form-error { color: #e53e3e; font-size: 12px; margin-top: 4px; }
     .form-success { text-align: center; padding: 40px 20px; }
     .form-success .check { width: 64px; height: 64px; border-radius: 50%; background: #06C755; color: #fff; font-size: 32px; line-height: 64px; margin: 0 auto 16px; }
@@ -426,6 +446,81 @@ function attachFormEvents(): void {
     e.preventDefault();
     void submitForm();
   });
+
+  // 予約フォーム（visit_date + visit_time）なら、日付変更時に空き状況を取得
+  const formDef = state.formDef;
+  if (!formDef) return;
+  const hasVisitDate = formDef.fields.some((f) => f.name === 'visit_date');
+  const hasVisitTime = formDef.fields.some((f) => f.name === 'visit_time' && f.type === 'checkbox');
+  if (!hasVisitDate || !hasVisitTime) return;
+
+  const dateInput = document.querySelector<HTMLInputElement>('input[name="visit_date"]');
+  if (!dateInput) return;
+
+  const refresh = () => {
+    const d = dateInput.value;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(d)) void fetchAndApplySlots(d);
+  };
+  dateInput.addEventListener('change', refresh);
+  dateInput.addEventListener('input', refresh);
+  // 初期値があれば即実行
+  if (dateInput.value) refresh();
+}
+
+interface SlotInfo { startAt: string; endAt: string; available: boolean; }
+
+async function fetchAndApplySlots(date: string): Promise<void> {
+  const formDef = state.formDef;
+  if (!formDef) return;
+
+  const group = document.querySelector<HTMLElement>('[data-field-name="visit_time"]');
+  if (!group) return;
+
+  // ローディング表示
+  let loadingEl = group.previousElementSibling as HTMLElement | null;
+  if (!loadingEl || !loadingEl.classList.contains('slot-loading')) {
+    loadingEl = document.createElement('div');
+    loadingEl.className = 'slot-loading';
+    group.parentElement?.insertBefore(loadingEl, group);
+  }
+  loadingEl.textContent = '空き状況を確認中...';
+
+  try {
+    const res = await apiCall(`/api/forms/${formDef.id}/available-slots?date=${encodeURIComponent(date)}`);
+    if (!res.ok) throw new Error('available-slots fetch failed');
+    const json = (await res.json()) as { success: boolean; data?: SlotInfo[] };
+    const slots = json.data || [];
+
+    // 各checkbox labelに対してavailable判定を適用
+    const labels = group.querySelectorAll<HTMLElement>('.checkbox-label');
+    labels.forEach((label) => {
+      const option = label.dataset.option || '';
+      const m = option.match(/^(\d{2}:\d{2})-(\d{2}:\d{2})$/);
+      if (!m) return;
+      const slotStart = m[1];
+      // API返却のstartAtは "YYYY-MM-DDTHH:mm:ss+09:00" 形式
+      const matched = slots.find((s) => {
+        const d = new Date(s.startAt);
+        const h = String(d.getHours()).padStart(2, '0');
+        const mm = String(d.getMinutes()).padStart(2, '0');
+        return `${h}:${mm}` === slotStart;
+      });
+      const available = matched ? matched.available : true;
+      const cb = label.querySelector<HTMLInputElement>('input[type="checkbox"]');
+      if (available) {
+        label.classList.remove('unavailable');
+        if (cb) cb.disabled = false;
+      } else {
+        label.classList.add('unavailable');
+        if (cb) { cb.disabled = true; cb.checked = false; }
+      }
+    });
+
+    loadingEl.textContent = '';
+  } catch (err) {
+    console.error('fetchAndApplySlots error:', err);
+    loadingEl.textContent = '空き状況の取得に失敗しました（すべての枠を表示します）';
+  }
 }
 
 // ========== Init ==========

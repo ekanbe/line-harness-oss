@@ -168,6 +168,61 @@ forms.get('/api/forms/:id/submissions', async (c) => {
   }
 });
 
+// GET /api/forms/:id/available-slots?date=YYYY-MM-DD — 予約フォーム用の空き時間取得（public, LIFF用）
+forms.get('/api/forms/:id/available-slots', async (c) => {
+  try {
+    const date = c.req.query('date');
+    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return c.json({ success: false, error: 'date (YYYY-MM-DD) is required' }, 400);
+    }
+
+    const startHour = Number(c.req.query('startHour') ?? '10');
+    const endHour = Number(c.req.query('endHour') ?? '17');
+
+    const serviceAccountKey = c.env.GOOGLE_SERVICE_ACCOUNT_KEY;
+    const calendarId = c.env.GOOGLE_CALENDAR_ID;
+
+    // 空き状況判定：Google Calendar未設定なら全枠 available として返す
+    const slots: { startAt: string; endAt: string; available: boolean }[] = [];
+    for (let h = startHour; h < endHour; h++) {
+      slots.push({
+        startAt: `${date}T${String(h).padStart(2, '0')}:00:00+09:00`,
+        endAt: `${date}T${String(h + 1).padStart(2, '0')}:00:00+09:00`,
+        available: true,
+      });
+    }
+
+    if (serviceAccountKey && calendarId) {
+      try {
+        const { getGoogleAccessToken } = await import('../services/google-auth.js');
+        const { GoogleCalendarClient } = await import('../services/google-calendar.js');
+        const accessToken = await getGoogleAccessToken(serviceAccountKey);
+        const calClient = new GoogleCalendarClient({ calendarId, accessToken });
+        const timeMin = `${date}T${String(startHour).padStart(2, '0')}:00:00+09:00`;
+        const timeMax = `${date}T${String(endHour).padStart(2, '0')}:00:00+09:00`;
+        const busy = await calClient.getFreeBusy(timeMin, timeMax);
+        // 各枠がbusyと重なるかチェック
+        for (const slot of slots) {
+          const s = new Date(slot.startAt).getTime();
+          const e = new Date(slot.endAt).getTime();
+          slot.available = !busy.some((b) => {
+            const bs = new Date(b.start).getTime();
+            const be = new Date(b.end).getTime();
+            return s < be && e > bs;
+          });
+        }
+      } catch (err) {
+        console.error('available-slots: freeBusy fetch failed, returning all available:', err);
+      }
+    }
+
+    return c.json({ success: true, data: slots });
+  } catch (err) {
+    console.error('GET /api/forms/:id/available-slots error:', err);
+    return c.json({ success: false, error: 'Internal server error' }, 500);
+  }
+});
+
 // POST /api/forms/:id/submit — submit form (public, used by LIFF)
 forms.post('/api/forms/:id/submit', async (c) => {
   try {
@@ -227,23 +282,49 @@ forms.post('/api/forms/:id/submit', async (c) => {
     // Google Calendar event creation (best-effort, runs regardless of friend resolution)
     if (c.env.GOOGLE_SERVICE_ACCOUNT_KEY && c.env.GOOGLE_CALENDAR_ID) {
       const dateField = fields.find((f) => f.type === 'date');
+      // visit_time は checkbox (複数選択) or select (単一) の両方に対応
       const timeField = fields.find(
         (f) =>
-          (f.type as string) === 'select' &&
-          (f.name.toLowerCase().includes('time') || (f.label || '').includes('時間')),
+          f.name.toLowerCase().includes('time') || (f.label || '').includes('時間'),
       );
       const dateValue = dateField ? submissionData[dateField.name] : undefined;
-      const timeValue = timeField ? submissionData[timeField.name] : undefined;
+      const rawTime = timeField ? submissionData[timeField.name] : undefined;
+
+      // 時間帯をArray化して正規化（"HH:MM-HH:MM" 形式のみ保持）
+      const timeSlots: string[] = Array.isArray(rawTime)
+        ? rawTime.filter((v): v is string => typeof v === 'string' && /^\d{2}:\d{2}-\d{2}:\d{2}$/.test(v))
+        : typeof rawTime === 'string' && /^\d{2}:\d{2}-\d{2}:\d{2}$/.test(rawTime)
+          ? [rawTime]
+          : [];
 
       if (
         typeof dateValue === 'string' &&
-        typeof timeValue === 'string' &&
         /^\d{4}-\d{2}-\d{2}$/.test(dateValue) &&
-        /^\d{2}:\d{2}-\d{2}:\d{2}$/.test(timeValue)
+        timeSlots.length > 0
       ) {
-        const [startTime, endTime] = timeValue.split('-');
-        const startIso = `${dateValue}T${startTime}:00+09:00`;
-        const endIso = `${dateValue}T${endTime}:00+09:00`;
+        // 時刻順にソート
+        const sortedSlots = [...timeSlots].sort((a, b) => a.localeCompare(b));
+
+        // 連続した区間ごとにグループ化
+        // 例: ["10:00-11:00", "11:00-12:00", "14:00-15:00"] → [["10:00-11:00", "11:00-12:00"], ["14:00-15:00"]]
+        const groups: string[][] = [];
+        let currentGroup: string[] = [];
+        for (const slot of sortedSlots) {
+          if (currentGroup.length === 0) {
+            currentGroup.push(slot);
+          } else {
+            const prev = currentGroup[currentGroup.length - 1];
+            const prevEnd = prev.split('-')[1];
+            const currStart = slot.split('-')[0];
+            if (prevEnd === currStart) {
+              currentGroup.push(slot);
+            } else {
+              groups.push(currentGroup);
+              currentGroup = [slot];
+            }
+          }
+        }
+        if (currentGroup.length > 0) groups.push(currentGroup);
 
         const companyField = fields.find(
           (f) =>
@@ -283,13 +364,20 @@ forms.post('/api/forms/:id/submit', async (c) => {
             );
             const accessToken = await getGoogleAccessToken(serviceAccountKey);
             const calClient = new GoogleCalendarClient({ calendarId, accessToken });
-            await calClient.createEvent({
-              summary,
-              description: descLines.join('\n'),
-              start: startIso,
-              end: endIso,
-            });
-            console.log('Google Calendar event created for submission', submission.id);
+            // 各連続区間ごとにイベントを作成（飛び飛びは複数イベント、連続は1イベント）
+            for (const group of groups) {
+              const groupStart = group[0].split('-')[0];
+              const groupEnd = group[group.length - 1].split('-')[1];
+              const startIso = `${dateValue}T${groupStart}:00+09:00`;
+              const endIso = `${dateValue}T${groupEnd}:00+09:00`;
+              await calClient.createEvent({
+                summary,
+                description: descLines.join('\n'),
+                start: startIso,
+                end: endIso,
+              });
+            }
+            console.log(`Google Calendar: ${groups.length} event(s) created for submission ${submission.id}`);
           } catch (err) {
             console.error('Google Calendar event creation failed:', err);
           }
