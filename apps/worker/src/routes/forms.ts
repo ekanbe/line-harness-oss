@@ -363,24 +363,44 @@ forms.post('/api/forms/:id/submit', async (c) => {
             };
           });
 
+          // 予約フォーム（visit_date + visit_time を含む）なら予約確認用テンプレを使う
+          const formFields = form.fields ? (JSON.parse(form.fields) as Array<{ name: string }>) : [];
+          const isReservation = formFields.some((f) => f.name === 'visit_date')
+            && formFields.some((f) => f.name === 'visit_time');
+
+          const headerTitle = isReservation ? 'ご予約ありがとうございます' : '診断結果';
+          const headerSub = isReservation
+            ? `${friend.display_name || ''}さんのご予約内容`
+            : `${friend.display_name || ''}さんのプロフィール`;
+          const headerBg = isReservation ? '#e0f2fe' : '#f0fdf4';
+          const noteText = isReservation
+            ? '当日のお越しをお待ちしております🙏 キャンセル・変更はメッセージでお知らせください。'
+            : 'メタデータに自動保存済み。今後の配信があなたに最適化されます。';
+          const noteBg = isReservation ? '#e0f2fe' : '#eff6ff';
+          const noteColor = isReservation ? '#0369a1' : '#2563EB';
+          const buttonLabel = isReservation ? '予約をキャンセル' : 'アカウント連携を見る';
+          const buttonText = isReservation ? '予約をキャンセル' : 'アカウント連携を見る';
+          const buttonColor = isReservation ? '#dc2626' : '#14b8a6';
+          const showNote = isReservation || form.save_to_metadata;
+
           const flex = {
             type: 'bubble', size: 'giga',
             header: {
               type: 'box', layout: 'vertical',
               contents: [
-                { type: 'text', text: '診断結果', size: 'lg', weight: 'bold', color: '#1e293b' },
-                { type: 'text', text: `${friend.display_name || ''}さんのプロフィール`, size: 'xs', color: '#64748b', margin: 'sm' },
+                { type: 'text', text: headerTitle, size: 'lg', weight: 'bold', color: '#1e293b' },
+                { type: 'text', text: headerSub, size: 'xs', color: '#64748b', margin: 'sm' },
               ],
-              paddingAll: '20px', backgroundColor: '#f0fdf4',
+              paddingAll: '20px', backgroundColor: headerBg,
             },
             body: {
               type: 'box', layout: 'vertical',
               contents: [
                 ...answerRows,
                 { type: 'separator', margin: 'lg' },
-                ...(form.save_to_metadata ? [{ type: 'box', layout: 'vertical', margin: 'lg', backgroundColor: '#eff6ff', cornerRadius: 'md', paddingAll: '12px',
+                ...(showNote ? [{ type: 'box', layout: 'vertical', margin: 'lg', backgroundColor: noteBg, cornerRadius: 'md', paddingAll: '12px',
                   contents: [
-                    { type: 'text', text: 'メタデータに自動保存済み。今後の配信があなたに最適化されます。', size: 'xxs', color: '#2563EB', wrap: true },
+                    { type: 'text', text: noteText, size: 'xxs', color: noteColor, wrap: true },
                   ],
                 }] : []),
               ],
@@ -389,7 +409,7 @@ forms.post('/api/forms/:id/submit', async (c) => {
             footer: {
               type: 'box', layout: 'vertical', paddingAll: '16px',
               contents: [
-                { type: 'button', action: { type: 'message', label: 'アカウント連携を見る', text: 'アカウント連携を見る' }, style: 'primary', color: '#14b8a6' },
+                { type: 'button', action: { type: 'message', label: buttonLabel, text: buttonText }, style: 'primary', color: buttonColor },
               ],
             },
           };
