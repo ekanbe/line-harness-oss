@@ -66,7 +66,7 @@ webhook.post('/webhook', async (c) => {
   const processingPromise = (async () => {
     for (const event of body.events) {
       try {
-        await handleEvent(db, lineClient, event, channelAccessToken, matchedAccountId, c.env.WORKER_URL || new URL(c.req.url).origin);
+        await handleEvent(db, lineClient, event, channelAccessToken, matchedAccountId, c.env.WORKER_URL || new URL(c.req.url).origin, c.env);
       } catch (err) {
         console.error('Error handling webhook event:', err);
       }
@@ -85,6 +85,7 @@ async function handleEvent(
   lineAccessToken: string,
   lineAccountId: string | null = null,
   workerUrl?: string,
+  env?: Env['Bindings'],
 ): Promise<void> {
   if (event.type === 'follow') {
     const userId =
@@ -186,6 +187,130 @@ async function handleEvent(
     return;
   }
 
+  // 予約キャンセル用postback処理
+  if ((event as { type: string }).type === 'postback') {
+    const postbackEvent = event as unknown as {
+      replyToken: string;
+      source: { type: string; userId?: string };
+      postback: { data: string };
+    };
+    const userId = postbackEvent.source.type === 'user' ? postbackEvent.source.userId : undefined;
+    if (!userId) return;
+
+    let friend = await getFriendByLineUserId(db, userId);
+    if (!friend) {
+      try {
+        const profile = await lineClient.getProfile(userId);
+        friend = await upsertFriend(db, {
+          lineUserId: userId,
+          displayName: profile?.displayName ?? null,
+          pictureUrl: profile?.pictureUrl ?? null,
+          statusMessage: profile?.statusMessage ?? null,
+        });
+      } catch (err) {
+        console.error('postback: auto-register friend failed', err);
+        return;
+      }
+    }
+
+    const data = postbackEvent.postback.data;
+    if (data.startsWith('cancel_reservation:')) {
+      const submissionId = data.slice('cancel_reservation:'.length);
+      try {
+        const row = await db
+          .prepare('SELECT id, friend_id, data FROM form_submissions WHERE id = ?')
+          .bind(submissionId)
+          .first<{ id: string; friend_id: string; data: string }>();
+
+        if (!row || row.friend_id !== friend.id) {
+          await lineClient.replyMessage(postbackEvent.replyToken, [
+            buildMessage('text', '予約が見つかりませんでした。'),
+          ]);
+          return;
+        }
+
+        const subData = JSON.parse(row.data || '{}') as Record<string, unknown>;
+        if (subData._cancelled_at) {
+          await lineClient.replyMessage(postbackEvent.replyToken, [
+            buildMessage('text', 'この予約はすでにキャンセル済みです。'),
+          ]);
+          return;
+        }
+
+        const eventIds = Array.isArray(subData._calendar_event_ids)
+          ? (subData._calendar_event_ids as string[])
+          : [];
+
+        // Google Calendarから削除
+        let deletedCount = 0;
+        if (eventIds.length > 0 && env?.GOOGLE_SERVICE_ACCOUNT_KEY && env?.GOOGLE_CALENDAR_ID) {
+          try {
+            const { getGoogleAccessToken } = await import('../services/google-auth.js');
+            const { GoogleCalendarClient } = await import('../services/google-calendar.js');
+            const accessToken = await getGoogleAccessToken(env.GOOGLE_SERVICE_ACCOUNT_KEY);
+            const calClient = new GoogleCalendarClient({
+              calendarId: env.GOOGLE_CALENDAR_ID,
+              accessToken,
+            });
+            for (const eid of eventIds) {
+              try {
+                await calClient.deleteEvent(eid);
+                deletedCount++;
+              } catch (err) {
+                console.warn(`Google Calendar event ${eid} delete failed:`, err);
+              }
+            }
+          } catch (err) {
+            console.error('Google Calendar auth/setup failed for cancel:', err);
+          }
+        }
+
+        // submission data に _cancelled_at を記録
+        const cancelledData = { ...subData, _cancelled_at: jstNow() };
+        await db
+          .prepare('UPDATE form_submissions SET data = ? WHERE id = ?')
+          .bind(JSON.stringify(cancelledData), submissionId)
+          .run();
+
+        const visitDate = String(subData.visit_date ?? '');
+        const rawTime = subData.visit_time;
+        const timeStr = Array.isArray(rawTime) ? rawTime.join(', ') : String(rawTime ?? '');
+
+        await lineClient.replyMessage(postbackEvent.replyToken, [
+          buildMessage('flex', JSON.stringify({
+            type: 'bubble', size: 'mega',
+            header: {
+              type: 'box', layout: 'vertical',
+              contents: [
+                { type: 'text', text: 'キャンセル完了', size: 'lg', weight: 'bold', color: '#1e293b' },
+              ],
+              paddingAll: '16px', backgroundColor: '#fef2f2',
+            },
+            body: {
+              type: 'box', layout: 'vertical', spacing: 'sm',
+              contents: [
+                { type: 'text', text: `${visitDate} のご予約をキャンセルしました。`, size: 'sm', color: '#1e293b', wrap: true },
+                { type: 'text', text: timeStr, size: 'xs', color: '#64748b', margin: 'sm' },
+                { type: 'separator', margin: 'lg' },
+                { type: 'text', text: `Googleカレンダーから${deletedCount}件のイベントを削除しました。`, size: 'xxs', color: '#64748b', margin: 'lg', wrap: true },
+                { type: 'text', text: 'またのご予約をお待ちしております🙏', size: 'xs', color: '#1e293b', margin: 'md', wrap: true },
+              ],
+              paddingAll: '16px',
+            },
+          }), 'キャンセル完了'),
+        ]);
+      } catch (err) {
+        console.error('予約キャンセル処理エラー:', err);
+        try {
+          await lineClient.replyMessage(postbackEvent.replyToken, [
+            buildMessage('text', 'キャンセル処理中にエラーが発生しました。お手数ですが直接ご連絡ください。'),
+          ]);
+        } catch { /* silent */ }
+      }
+    }
+    return;
+  }
+
   if (event.type === 'message' && event.message.type === 'text') {
     const textMessage = event.message as TextEventMessage;
     const userId =
@@ -211,6 +336,94 @@ async function handleEvent(
         console.error('Failed to auto-register friend from message event:', err);
         return;
       }
+    }
+
+    // 予約をキャンセル: キャンセル対象の予約一覧をFlex Messageで表示
+    if ((event.message as TextEventMessage).text === '予約をキャンセル') {
+      try {
+        const today = new Date();
+        const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+        const rows = await db
+          .prepare(
+            `SELECT id, data, created_at FROM form_submissions
+             WHERE friend_id = ?
+               AND (json_extract(data, '$._cancelled_at') IS NULL)
+               AND (json_extract(data, '$.visit_date') >= ?)
+             ORDER BY json_extract(data, '$.visit_date') ASC, created_at DESC
+             LIMIT 10`,
+          )
+          .bind(friend.id, todayStr)
+          .all<{ id: string; data: string; created_at: string }>();
+
+        const submissions = rows.results.map((r) => {
+          const data = JSON.parse(r.data || '{}') as Record<string, unknown>;
+          return { id: r.id, data };
+        });
+
+        if (submissions.length === 0) {
+          await lineClient.replyMessage(event.replyToken, [
+            buildMessage('text', 'キャンセル可能な予約が見つかりません。\n(今後の日程で未キャンセルの予約のみ表示されます)'),
+          ]);
+          return;
+        }
+
+        // Flex Carousel で予約一覧表示、各予約にキャンセルボタン
+        const bubbles = submissions.map((sub) => {
+          const d = sub.data;
+          const visitDate = String(d.visit_date ?? '');
+          const rawTime = d.visit_time;
+          const timeStr = Array.isArray(rawTime) ? rawTime.join(', ') : String(rawTime ?? '');
+          const company = String(d.company_name ?? '');
+          const contact = String(d.contact_name ?? '');
+          const numVisitors = String(d.num_visitors ?? '');
+          return {
+            type: 'bubble',
+            size: 'mega',
+            header: {
+              type: 'box', layout: 'vertical',
+              contents: [
+                { type: 'text', text: visitDate, size: 'lg', weight: 'bold', color: '#1e293b' },
+                { type: 'text', text: timeStr, size: 'sm', color: '#64748b', margin: 'sm', wrap: true },
+              ],
+              paddingAll: '16px', backgroundColor: '#e0f2fe',
+            },
+            body: {
+              type: 'box', layout: 'vertical', spacing: 'sm',
+              contents: [
+                { type: 'box', layout: 'baseline', contents: [
+                  { type: 'text', text: '会社', size: 'xs', color: '#64748b', flex: 2 },
+                  { type: 'text', text: company || '-', size: 'sm', color: '#1e293b', flex: 5, wrap: true },
+                ]},
+                { type: 'box', layout: 'baseline', contents: [
+                  { type: 'text', text: '担当', size: 'xs', color: '#64748b', flex: 2 },
+                  { type: 'text', text: contact || '-', size: 'sm', color: '#1e293b', flex: 5, wrap: true },
+                ]},
+                { type: 'box', layout: 'baseline', contents: [
+                  { type: 'text', text: '人数', size: 'xs', color: '#64748b', flex: 2 },
+                  { type: 'text', text: numVisitors || '-', size: 'sm', color: '#1e293b', flex: 5 },
+                ]},
+              ],
+              paddingAll: '16px',
+            },
+            footer: {
+              type: 'box', layout: 'vertical', paddingAll: '12px',
+              contents: [
+                { type: 'button',
+                  action: { type: 'postback', label: 'この予約をキャンセル', data: `cancel_reservation:${sub.id}`, displayText: `${visitDate} の予約をキャンセル` },
+                  style: 'primary', color: '#dc2626' },
+              ],
+            },
+          };
+        });
+
+        const carousel = { type: 'carousel', contents: bubbles };
+        await lineClient.replyMessage(event.replyToken, [
+          buildMessage('flex', JSON.stringify(carousel), 'キャンセル可能な予約一覧'),
+        ]);
+      } catch (err) {
+        console.error('予約キャンセル一覧表示エラー:', err);
+      }
+      return;
     }
 
     const incomingText = textMessage.text;

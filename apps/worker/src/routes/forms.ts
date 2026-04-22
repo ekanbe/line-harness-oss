@@ -365,19 +365,27 @@ forms.post('/api/forms/:id/submit', async (c) => {
             const accessToken = await getGoogleAccessToken(serviceAccountKey);
             const calClient = new GoogleCalendarClient({ calendarId, accessToken });
             // 各連続区間ごとにイベントを作成（飛び飛びは複数イベント、連続は1イベント）
+            const eventIds: string[] = [];
             for (const group of groups) {
               const groupStart = group[0].split('-')[0];
               const groupEnd = group[group.length - 1].split('-')[1];
               const startIso = `${dateValue}T${groupStart}:00+09:00`;
               const endIso = `${dateValue}T${groupEnd}:00+09:00`;
-              await calClient.createEvent({
+              const { eventId } = await calClient.createEvent({
                 summary,
                 description: descLines.join('\n'),
                 start: startIso,
                 end: endIso,
               });
+              eventIds.push(eventId);
             }
-            console.log(`Google Calendar: ${groups.length} event(s) created for submission ${submission.id}`);
+            // キャンセル機能のため、作成したevent IDをform_submissionsに保存
+            const enrichedData = { ...submissionData, _calendar_event_ids: eventIds };
+            await c.env.DB
+              .prepare('UPDATE form_submissions SET data = ? WHERE id = ?')
+              .bind(JSON.stringify(enrichedData), submission.id)
+              .run();
+            console.log(`Google Calendar: ${groups.length} event(s) created for submission ${submission.id}, eventIds: ${eventIds.join(',')}`);
           } catch (err) {
             console.error('Google Calendar event creation failed:', err);
           }
