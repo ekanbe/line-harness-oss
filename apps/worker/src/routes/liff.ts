@@ -566,9 +566,15 @@ liffRoutes.post('/api/liff/link', async (c) => {
     const email = verified.email || null;
 
     const db = c.env.DB;
-    const friend = await getFriendByLineUserId(db, lineUserId);
+    let friend = await getFriendByLineUserId(db, lineUserId);
     if (!friend) {
-      return c.json({ success: false, error: 'Friend not found' }, 404);
+      // LIFF経由で初回アクセス時は自動登録（Webhook設定前から友だちだった人の救済）
+      friend = await upsertFriend(db, {
+        lineUserId,
+        displayName: body.displayName || verified.name || null,
+        pictureUrl: null,
+        statusMessage: null,
+      });
     }
 
     if ((friend as unknown as Record<string, unknown>).user_id) {
